@@ -162,52 +162,55 @@ void recvPkgAndAssemble(char *outputFile, int sockfd, FILE *file, int *operation
         }
 
         // Valida o pacote recebido
-        if (msg.MI == INIT_MARKER && isValidPackage(msg, bytesReceived, expectedSeq)) {
-            *operation = getType(msg.Header);
-            
-            switch (*operation) {
-                case DATA:
-                    receiveData(&msg, file, &response);
-                    break;
-                case BACKUP:
-                case RESTORE:
-                case VERIFY:
-                    receiveFilename(filename, &msg);
-                    setType(&response.Header, OK);
-                    break;
-                case SIZE:
-                    receiveSize(&msg, &response);
-                    break;
-                case OKCHECKSUM: 
-                    receiveChecksum(&msg, &response, &outputFile);
-                    break;
-                case END:
-                    setType(&response.Header, ACK);
-                    break;
-                default:
-                    setType(&response.Header, ERROR);
-                    break;
-            }
+        if (msg.MI == INIT_MARKER){
+            if(isValidPackage(msg, bytesReceived, expectedSeq)) {
+                *operation = getType(msg.Header);
+                
+                switch (*operation) {
+                    case DATA:
+                        receiveData(&msg, file, &response);
+                        break;
+                    case BACKUP:
+                    case RESTORE:
+                    case VERIFY:
+                        receiveFilename(filename, &msg);
+                        setType(&response.Header, OK);
+                        break;
+                    case SIZE:
+                        receiveSize(&msg, &response);
+                        break;
+                    case OKCHECKSUM: 
+                        receiveChecksum(&msg, &response, &outputFile);
+                        break;
+                    case END:
+                        setType(&response.Header, ACK);
+                        break;
+                    default:
+                        setType(&response.Header, ERROR);
+                        break;
+                }
 
-            // Envia resposta ACK para o pacote válido
-            setSeq(&response.Header, expectedSeq);
-            expectedSeq = (expectedSeq + 1) % 32;
-            send(sockfd, &response, sizeof(response), 0);
-
-            // Se o tamanho dos dados for menor que o máximo, assumimos fim da transmissão
-            if (getTam(msg.Header) < MAX_DATA_SIZE) {
-                break;
-            }
-        } else {
-            // Pacote inválido ou fora de sequência: enviar NACK somente se fora de sequência
-            uint8_t receivedSeq = getSeq(msg.Header);
-            if (receivedSeq != expectedSeq) {
-                printf("Pacote fora de sequência (esperado: %d, recebido: %d). Enviando NACK.\n", expectedSeq, receivedSeq);
+                // Envia resposta ACK para o pacote válido
                 setSeq(&response.Header, expectedSeq);
-                setType(&response.Header, NACK);
+                expectedSeq = (expectedSeq + 1) % 32;
                 send(sockfd, &response, sizeof(response), 0);
-            } else {
-                printf("Pacote inválido. Ignorando.\n");
+
+                // Se o tamanho dos dados for menor que o máximo, assumimos fim da transmissão
+                if (getTam(msg.Header) < MAX_DATA_SIZE) {
+                    break;
+                }
+            }
+            else {
+                // Pacote inválido ou fora de sequência: enviar NACK somente se fora de sequência
+                uint8_t receivedSeq = getSeq(msg.Header);
+                if (receivedSeq != expectedSeq) {
+                    printf("Pacote fora de sequência (esperado: %d, recebido: %d). Enviando NACK.\n", expectedSeq, receivedSeq);
+                    setSeq(&response.Header, expectedSeq);
+                    setType(&response.Header, NACK);
+                    send(sockfd, &response, sizeof(response), 0);
+                } else {
+                    printf("Pacote inválido. Ignorando.\n");
+                }
             }
         }
     }
