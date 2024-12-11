@@ -121,83 +121,84 @@ void partFileAndSend(const char *fileName, int sockfd, int operation) {
 
 void recvPkgAndAssemble(char *outputFile, int sockfd, FILE *file, int *operation) {
     Message msg, response;
-    uint8_t buffer[sizeof(Message)];
+    uint8_t bytesReceived = 0;
     uint8_t expectedSeq = 0;
-    int bytesAccumulated = 0;
     char filename[FILENAME_SIZE] = {0};
 
     while (1) {
-        // Receber o próximo fragmento
-        int bytesReceived = recv(sockfd, buffer + bytesAccumulated, sizeof(Message) - bytesAccumulated, 0);
+        // Inicializa o buffer do pacote
+        memset(&msg, 0, sizeof(msg));
         
-        if (bytesReceived < 0) {
-            perror("Erro ao receber dados");
-            break;
-        } else if (bytesReceived == 0) {
-            printf("Conexão fechada pelo cliente.\n");
+        // Recebe o pacote
+        bytesReceived = recv(sockfd, &msg, sizeof(msg), 0);
+        
+        if (bytesReceived <= 0) {
+            if (bytesReceived == 0) {
+                printf("Conexão encerrada pelo cliente.\n");
+            } else {
+                perror("Erro ao receber dados");
+            }
             break;
         }
 
-        // Acumular os dados recebidos
-        bytesAccumulated += bytesReceived;
-
-        // Verificar se o pacote está completo
-        if (bytesAccumulated < sizeof(Message)) {
-            continue; // Ainda faltam dados, continuar recebendo
+        // Verifica se o pacote recebido é válido
+        if (bytesReceived < sizeof(msg)) {
+            printf("Pacote incompleto recebido (%d bytes). Enviando NACK para seq: %d\n", bytesReceived, expectedSeq);
+            setSeq(&response.Header, expectedSeq);
+            setType(&response.Header, NACK);
+            send(sockfd, &response, sizeof(response), 0);
+            continue;
         }
 
-        // Copiar os dados acumulados para o pacote `msg`
-        memcpy(&msg, buffer, sizeof(Message));
-        bytesAccumulated = 0; // Resetar para o próximo pacote
-
-        if (msg.MI == INIT_MARKER && isValidPackage(msg, sizeof(Message), expectedSeq)) {
+        // Valida o pacote recebido
+        if (msg.MI == INIT_MARKER && isValidPackage(msg, bytesReceived, expectedSeq)) {
             *operation = getType(msg.Header);
-
+            
             switch (*operation) {
                 case DATA:
                     receiveData(&msg, file, &response);
                     break;
-
                 case BACKUP:
                 case RESTORE:
                 case VERIFY:
                     receiveFilename(filename, &msg);
                     setType(&response.Header, OK);
                     break;
-
                 case SIZE:
                     receiveSize(&msg, &response);
                     break;
-
-                case OKCHECKSUM:
+                case OKCHECKSUM: 
                     receiveChecksum(&msg, &response, &outputFile);
                     break;
-
                 case END:
                     setType(&response.Header, ACK);
                     break;
-
                 default:
                     setType(&response.Header, ERROR);
                     break;
             }
 
+            // Envia resposta ACK para o pacote válido
             setSeq(&response.Header, expectedSeq);
             expectedSeq = (expectedSeq + 1) % 32;
             send(sockfd, &response, sizeof(response), 0);
 
+            // Se o tamanho dos dados for menor que o máximo, assumimos fim da transmissão
             if (getTam(msg.Header) < MAX_DATA_SIZE) {
                 break;
             }
         } else {
-            // Pacote inválido ou incompleto
+            // Pacote inválido ou fora de sequência: enviar NACK
+            printf("Pacote inválido ou fora de sequência. Enviando NACK para seq: %d\n", expectedSeq);
             setSeq(&response.Header, expectedSeq);
             setType(&response.Header, NACK);
             send(sockfd, &response, sizeof(response), 0);
         }
     }
 
+    // Processa o nome do arquivo, se necessário
     if (strlen(filename) > 0) {
         strcpy(outputFile, getFileName(filename));
     }
 }
+
