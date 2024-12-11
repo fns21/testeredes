@@ -121,109 +121,83 @@ void partFileAndSend(const char *fileName, int sockfd, int operation) {
 
 void recvPkgAndAssemble(char *outputFile, int sockfd, FILE *file, int *operation) {
     Message msg, response;
-    ssize_t bytesReceived;
+    uint8_t buffer[sizeof(Message)];
     uint8_t expectedSeq = 0;
+    int bytesAccumulated = 0;
     char filename[FILENAME_SIZE] = {0};
-    int receiving = 1;
 
-    // Loop principal para receber pacotes
-    while (receiving) {
-        // Receber mensagem do socket
-        bytesReceived = recv(sockfd, &msg, sizeof(msg), 0);
-
-        // Verifica se houve erro ou fim da conexão
+    while (1) {
+        // Receber o próximo fragmento
+        int bytesReceived = recv(sockfd, buffer + bytesAccumulated, sizeof(Message) - bytesAccumulated, 0);
+        
         if (bytesReceived < 0) {
             perror("Erro ao receber dados");
             break;
         } else if (bytesReceived == 0) {
-            printf("Conexão encerrada pelo remetente.\n");
+            printf("Conexão fechada pelo cliente.\n");
             break;
         }
 
-        // Verificar marcador inicial e validade do pacote
-        if (msg.MI == INIT_MARKER && isValidPackage(msg, bytesReceived, expectedSeq)) {
+        // Acumular os dados recebidos
+        bytesAccumulated += bytesReceived;
+
+        // Verificar se o pacote está completo
+        if (bytesAccumulated < sizeof(Message)) {
+            continue; // Ainda faltam dados, continuar recebendo
+        }
+
+        // Copiar os dados acumulados para o pacote `msg`
+        memcpy(&msg, buffer, sizeof(Message));
+        bytesAccumulated = 0; // Resetar para o próximo pacote
+
+        if (msg.MI == INIT_MARKER && isValidPackage(msg, sizeof(Message), expectedSeq)) {
             *operation = getType(msg.Header);
 
-            // Processar diferentes tipos de operações
             switch (*operation) {
                 case DATA:
-                    // Escrever dados recebidos no arquivo
-                    if (file) {
-                        size_t written = fwrite(msg.Data, 1, getTam(msg.Header), file);
-                        if (written != getTam(msg.Header)) {
-                            perror("Erro ao escrever no arquivo");
-                            receiving = 0;
-                        }
-                    }
-                    setType(&response.Header, ACK);
+                    receiveData(&msg, file, &response);
                     break;
 
                 case BACKUP:
                 case RESTORE:
                 case VERIFY:
-                    // Receber o nome do arquivo
                     receiveFilename(filename, &msg);
                     setType(&response.Header, OK);
                     break;
 
                 case SIZE:
-                    // Processar tamanho do arquivo
                     receiveSize(&msg, &response);
                     break;
 
                 case OKCHECKSUM:
-                    // Verificar integridade
                     receiveChecksum(&msg, &response, &outputFile);
                     break;
 
                 case END:
-                    // Finalizar operação
                     setType(&response.Header, ACK);
-                    receiving = 0; // Sair do loop após receber END
                     break;
 
                 default:
-                    // Tipo de operação inválido
-                    fprintf(stderr, "Operação inválida recebida.\n");
                     setType(&response.Header, ERROR);
-                    receiving = 0;
                     break;
             }
 
-            // Enviar resposta com sequência esperada
             setSeq(&response.Header, expectedSeq);
             expectedSeq = (expectedSeq + 1) % 32;
+            send(sockfd, &response, sizeof(response), 0);
 
-            if (send(sockfd, &response, sizeof(response), 0) < 0) {
-                perror("Erro ao enviar resposta");
+            if (getTam(msg.Header) < MAX_DATA_SIZE) {
                 break;
             }
-
-            // Verificar se é o último pacote (tamanho menor que o máximo permitido)
-            if (getTam(msg.Header) < MAX_DATA_SIZE && *operation == DATA) {
-                receiving = 0;
-            }
-
         } else {
-            // Pacote inválido ou fora de sequência
+            // Pacote inválido ou incompleto
             setSeq(&response.Header, expectedSeq);
             setType(&response.Header, NACK);
-
-            if (send(sockfd, &response, sizeof(response), 0) < 0) {
-                perror("Erro ao enviar NACK");
-                break;
-            }
+            send(sockfd, &response, sizeof(response), 0);
         }
     }
 
-    // Salvar o nome do arquivo recebido, se aplicável
     if (strlen(filename) > 0) {
-        strncpy(outputFile, filename, FILENAME_SIZE - 1);
-        outputFile[FILENAME_SIZE - 1] = '\0'; // Garantir terminação nula
-    }
-
-    // Verificar se o arquivo precisa ser fechado
-    if (file) {
-        fclose(file);
+        strcpy(outputFile, getFileName(filename));
     }
 }
