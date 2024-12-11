@@ -25,8 +25,10 @@ void partFileAndSend(const char *fileName, int sockfd, int operation) {
     uint8_t seq = 0;
     FILE *file = NULL;
     int eof = 0;
+    int maxRetransmissions = 5; // Limite de retransmissões
+    int retransmissions = 0;
 
-    if(operation == DATA || operation == SIZE){
+    if (operation == DATA || operation == SIZE) {
         file = fopen(fileName, "rb");
         if (!file) {
             operation = ERROR_CANT_FIND_FILE;
@@ -41,7 +43,6 @@ void partFileAndSend(const char *fileName, int sockfd, int operation) {
                     sendData(file, &msg, &seq, &bytesRead, tempBuffer);
                     if (bytesRead < MAX_DATA_SIZE) eof = 1; // Fim do arquivo
                     break;
-                // Todos enviam o nome do arquivo
                 case BACKUP:
                 case RESTORE:
                 case VERIFY:
@@ -83,6 +84,11 @@ void partFileAndSend(const char *fileName, int sockfd, int operation) {
             recv(sockfd, &response, sizeof(response), 0);
             if (timestamp() - start > TIMEOUT_MILLIS) {
                 printf("Timeout para o pacote %u. Reenviando...\n", seq);
+                if (++retransmissions > maxRetransmissions) {
+                    fprintf(stderr, "Falha: número máximo de retransmissões atingido.\n");
+                    transferSuccess = 0;
+                    eof = 1; // Finaliza a transferência
+                }
                 break; // Timeout ou erro: retransmitir
             }
 
@@ -93,12 +99,20 @@ void partFileAndSend(const char *fileName, int sockfd, int operation) {
                 if (responseType == ACK || responseType == OK) {
                     seq = (seq + 1) % 32;
                     bytesRead = 0; // Preparar para o próximo pacote
+                    retransmissions = 0; // Reseta contador de retransmissões
                     break;
                 } else if (responseType == NACK) {
                     printf("NACK recebido. Retransmitindo pacote %u...\n", seq);
+                    if (++retransmissions > maxRetransmissions) {
+                        fprintf(stderr, "Falha: número máximo de retransmissões atingido.\n");
+                        transferSuccess = 0;
+                        eof = 1; // Finaliza a transferência
+                    }
                     break; // Retransmitir o mesmo pacote
                 } else if (responseType == ERROR) {
                     fprintf(stderr, "Erro recebido do servidor. Operação abortada.\n");
+                    transferSuccess = 0;
+                    eof = 1;
                     break;
                 }
             } else if (responseSeq == (seq + 1) % 32) {
@@ -143,11 +157,8 @@ void recvPkgAndAssemble(char *outputFile, int sockfd, FILE *file, int *operation
 
         // Verifica se o pacote recebido é válido
         if (bytesReceived < sizeof(msg)) {
-            printf("Pacote incompleto recebido (%d bytes). Enviando NACK para seq: %d\n", bytesReceived, expectedSeq);
-            setSeq(&response.Header, expectedSeq);
-            setType(&response.Header, NACK);
-            send(sockfd, &response, sizeof(response), 0);
-            continue;
+            printf("Pacote incompleto recebido (%d bytes). Ignorando.\n", bytesReceived);
+            continue; // Ignora pacotes incompletos
         }
 
         // Valida o pacote recebido
@@ -188,11 +199,16 @@ void recvPkgAndAssemble(char *outputFile, int sockfd, FILE *file, int *operation
                 break;
             }
         } else {
-            // Pacote inválido ou fora de sequência: enviar NACK
-            printf("Pacote inválido ou fora de sequência. Enviando NACK para seq: %d\n", expectedSeq);
-            setSeq(&response.Header, expectedSeq);
-            setType(&response.Header, NACK);
-            send(sockfd, &response, sizeof(response), 0);
+            // Pacote inválido ou fora de sequência: enviar NACK somente se fora de sequência
+            uint8_t receivedSeq = getSeq(msg.Header);
+            if (receivedSeq != expectedSeq) {
+                printf("Pacote fora de sequência (esperado: %d, recebido: %d). Enviando NACK.\n", expectedSeq, receivedSeq);
+                setSeq(&response.Header, expectedSeq);
+                setType(&response.Header, NACK);
+                send(sockfd, &response, sizeof(response), 0);
+            } else {
+                printf("Pacote inválido. Ignorando.\n");
+            }
         }
     }
 
@@ -201,4 +217,3 @@ void recvPkgAndAssemble(char *outputFile, int sockfd, FILE *file, int *operation
         strcpy(outputFile, getFileName(filename));
     }
 }
-
